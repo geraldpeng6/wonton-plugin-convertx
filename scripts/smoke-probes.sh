@@ -12,11 +12,11 @@ export IDENTITY_NA=1
 export SMOKE_NOTE="ConvertX 用应用自己的账号（第一个注册的是管理员），与核心会话无关；主人能打开由网页项证明，应用账号和数据的读写由 data_write/data_check 验证。"
 
 state_file() { # SMOKE_STATE 套件里是标记文件，dev.sh probes 里是状态目录
-  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/convertx-state.json"; else printf '%s' "$SMOKE_STATE"; fi
+  if [[ -d "${SMOKE_STATE:-}" ]]; then printf '%s' "$SMOKE_STATE/convertx-state.json"; else printf '%s' "${SMOKE_STATE:-}"; fi
 }
 
-_container() { # 本实例里 convertx 服务的容器
-  local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$SMOKE_PLUGIN_ID" --filter "label=wonton.service=convertx")
+_container() { # 本实例里 convertx 服务的容器；e2e 的 data_write 跑在 SMOKE_PLUGIN_ID 导出之前，id 用字面量
+  local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=app.convertx.convertx" --filter "label=wonton.service=convertx")
   if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
     inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
   fi
