@@ -1,78 +1,86 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# ConvertX：网页上传文件、选目标格式、下载转换结果，后端是 ffmpeg、ImageMagick、LibreOffice、pandoc 等本机转换器。
+# 上游 AGPL-3.0，官方镜像 ghcr.io/c4illin/convertx，按清单列表（index）摘要固定。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+  convertx:
+    image: ghcr.io/c4illin/convertx:v0.20.0@sha256:6259e0c1e063120b1ddbc6937372a83be58182b2c9dc82264f58e100907b3e51
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      # 上游入口脚本先以 root 把数据目录 chown 成 PUID:PGID 再降权运行（gosu），所以不写 user：
+      # 核心按“没写 user”把数据目录交给 PUID:PGID，入口脚本接手后应用以这个用户跑。
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      # 经核心网关进容器的是 HTTP：上游给 Cookie 加 Secure 标志（secure: !HTTP_ALLOWED），
+      # Secure Cookie 在浏览器的 HTTP 页面上会被丢掉，登录不上。网关挡在前面，这里开 HTTP 不降低安全性。
+      HTTP_ALLOWED: "true"
+      # 上游实测（src/pages/user.tsx）：false 时第一个账号仍能注册（setup 页），之后注册一律拒绝。
+      # 网关挡着，注册页只有用户打得开。
+      ACCOUNT_REGISTRATION: "false"
+      ALLOW_UNAUTHENTICATED: "false"
+      # 不设的话上游每次重启用 randomUUID() 换密钥，所有登录作废。
+      JWT_SECRET: ${WONTON_SECRET_JWT_SECRET}
+      # 设置项走规范 0.12 的 settings；核心 PR #242 合入前 WONTON_SETTING_* 不注入，冒号减号的默认值兜底，
+      # 兜底值和 Schema 里的 default 一致，当前核心上就是生效值。
+      MAX_CONVERT_PROCESS: "${WONTON_SETTING_MAX_CONVERT_PROCESS:-2}"
+      AUTO_DELETE_EVERY_N_HOURS: "${WONTON_SETTING_AUTO_DELETE_EVERY_N_HOURS:-24}"
+      # 上游只拿它格式化历史页的日期时间，不改界面语言。
+      LANGUAGE: "${WONTON_SETTING_LANGUAGE:-en}"
+    volumes:
+      # SQLite 账号库和上传/输出文件都在这里（data/uploads、data/output）。
+      - ${WONTON_APP_DATA}:/app/data
+    # /healthcheck 是上游自带的无鉴权接口（src/pages/healthcheck.tsx），镜像里有 curl。
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3000/healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 30s
-      start_interval: 1s
-
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+      start_interval: 2s
 
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  # 0.12：settings 是 0.12 的字段；核心 PR #242 合入前不注入设置值，compose 里都写了 :- 默认值兜底。
+  spec: "0.12"
+  id: app.convertx.convertx
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { zh: 文件格式转换（ConvertX）, en: ConvertX }
+  description:
+    zh: 像格式工厂：网页上传文件、选目标格式，转完直接下载，上千种格式都能转。偶尔把 Heic 照片转 JPG、Markdown 转 PDF、视频转音频，不用在电脑上装软件。
+    en: "Like Format Factory: upload a file, pick the target format and download the result — over a thousand formats supported. Convert Heic photos to JPG, Markdown to PDF or video to audio without installing anything."
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
-  tags:
-    zh: [工具]
-    en: [Tools]
+  screenshots: [screenshots/home.png, screenshots/convert.png, screenshots/result.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://github.com/C4illin/ConvertX
+  license: AGPL-3.0-only
+  tags: { zh: [工具, 文件], en: [Tools, Files] }
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      把文件转成想要的格式：打开网页、拖进文件、选好目标格式，转完直接下载。
+
+      图片、文档、电子书、音视频、表格的常用互转都有：Heic 照片转 JPG、Markdown 转 PDF、Word 转 PDF、WAV 转 MP3 这类事都在网页上完成。文件在家里服务器上转换，不经过任何外部网站。
+
+      第一个注册的账号是管理员，之后注册自动关闭，家里人共用这个账号。转换结果默认保留 24 小时，同时转换的任务数和日期格式都能在插件设置里改。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Convert files to the format you need: open the web page, drop in a file, pick the target format and download the result.
+
+      Common conversions for images, documents, e-books, audio and video are all there: Heic photos to JPG, Markdown to PDF, Word to PDF, WAV to MP3 — everything happens on your own server, no outside website involved.
+
+      The first account registered becomes the admin; registration then closes and the household shares that account. Converted files are kept for 24 hours by default; concurrency and date format are adjustable in the plugin settings.
+  release_notes: { zh: 第一个版本。, en: Initial release. }
+  setup:
+    zh: 打开应用，注册第一个账号：它就是管理员账号，之后注册会自动关闭。
+    en: "Open the app and create the first account: it becomes the admin, and registration closes after that."
+  settings: settings.schema.json
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
+    service: convertx
+    port: 3000
+    # 应用自己的账号体系（第一个注册的是管理员），核心网关挡在前面。
+    sso: none
+  secrets:
+    jwt_secret:
+      generate: { bytes: 32 }
+  # 应用和全部转换器都在镜像里，运行时不下载任何东西，不出网。
   permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+  # 上游没写最低内存；实测 400 段 Markdown 转 PDF（calibre）峰值约 670 MiB、空闲更低，取 1G。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 1G

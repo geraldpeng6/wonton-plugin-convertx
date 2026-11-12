@@ -1,61 +1,112 @@
 # shellcheck shell=bash
-# scripts/smoke.sh 的一项一项探测，跟着插件走。没写的项会 FAIL 并给出写法，不会默认放行。
+# ConvertX：sso=none，应用自己的账号（第一个注册的是管理员，之后注册关闭）。
+# 探针在插件容器里用镜像自带的 curl 走 127.0.0.1:3000；请求同容器的回环地址，不涉代理。
 #
-# 变量别叫 state：shellcheck 把这份文件连着 probes.sh 一起分析，probes.sh 自己也读一个 dev.sh 提供的 state；
-# 子壳体函数（fn() ( … )）里给 state 赋值，SC2031 就报在 probes.sh 上，CI 红。
-#
-# 变量：SMOKE_WEB_URL 是应用的网页入口（套件已去尾斜杠，但可能带路径，比如 SSO 登录页）；
-#       拼 API 路径用 SMOKE_WEB_ORIGIN（只有 scheme://host:port，入口的路径不掺进来），别直接接在 SMOKE_WEB_URL 后面。
-#
-# 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
-# 身份：identity_check 只证明身份：用应用自己的“当前用户”接口断言认出的是用户管理员，不碰应用里的数据。
-#       数据断言（是否配置过、有几条、内容对不对）全部交给 data_write / data_check：冒烟第 1 项会先装升级
-#       起点写数据，身份探针再断言“数据目录是空的”就会红。接口回字段时也只看类型（如 configured 是布尔、
-#       nodes 是数字），值和条数留给 data_check。
-#       没有用户体系时写 IDENTITY_NA=1，并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
-#       SSO 登录跳转不用自己写表单逻辑：dweb --sso 会从清单 webui.path 的入口出发（没写就是 /），提交核心
-#       登录页的 JS 自动表单并跟完重定向，返回的页面已带应用的登录态。
-# 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
-#       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
-# 通知房间：申请了 notify 的插件把通知交给核心，核心以核心账号发进和主人的“Wonton”私聊。
-#       探针以主人身份读这个房间：probes_owner_room_wait <超时秒> <要找的文字> 等到开始之后发来的、包含这段文字的
-#       消息就返回 0，超时列出看到的最新消息并返回非 0。要先把等待挂到后台再发通知，否则消息可能在等待开始前就到：
-#         room_wait() {
-#           local marker="probe-$RANDOM" url
-#           url="$(docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" printenv WONTON_NOTIFY_URL)"
-#           probes_owner_room_wait 120 "$marker" & local pid=$!
-#           docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" wget -q -O /dev/null \
-#             --header 'Content-Type: application/json' --post-data "{\"title\":\"$marker\"}" "$url"
-#           wait "$pid"
-#         }
-#       上面的 web 换成插件里能发 HTTP 的服务；wget 换成那个服务里有的客户端。
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
-#       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
-#       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
-# 装之前要准备（如先配出口代理）：写 before_install。
+# 数据钩子：注册（首次）或登录（数据已在时）→ 上传带标记的 txt → calibre 转 PDF →
+# 等历史页出现 completed；data_check 用存的凭据重新登录，在历史页找标记。
+# 凭据和标记存 $SMOKE_STATE（JSON），升级/重装后照样能登录。
 
-web_assert() { grep -q '你好'; }   # 示例页的标题
+web_assert() { grep -qi 'convertx'; }   # setup 页（Welcome to ConvertX!）和登录页（ConvertX | Login）都命中
 
-identity_check() { # 页面回显的就是网关注入的用户名；示例页不存数据，也不拿数据判断身份
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
+export IDENTITY_NA=1
+export SMOKE_NOTE="ConvertX 用应用自己的账号（第一个注册的是管理员），与核心会话无关；主人能打开由网页项证明，应用账号和数据的读写由 data_write/data_check 验证。"
+
+state_file() { # SMOKE_STATE 套件里是标记文件，dev.sh probes 里是状态目录
+  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/convertx-state.json"; else printf '%s' "$SMOKE_STATE"; fi
 }
 
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：
-#   data_write 用随机标记写一条数据，把标记原样覆盖写进 $SMOKE_STATE（一个已建好的空文件，不是目录）；data_check 读回标记、去应用里找，
-#   找不到就打印看到了什么并返回非 0。
-# 应用不存用户数据时写 DATA_NA=1（两项记 N/A）。模板的示例页不存数据，所以这里是不适用。
-# 数据要写进插件容器时（Agent 插件的工作区标记等），容器名别自己拼：钩子契约里没有 SMOKE_SLUG，e2e 套件的
-# data_write 又跑在实例名导出之前，拼出来的名字缺段（No such container）；Bot 服务（清单声明了 bots）每个 Bot
-# 一组容器，名字还带 --<Bot 名> 后缀。按核心打的标签找，插件自带 smoke 和 e2e 套件两个运行环境都成立
-# （实例名没导出时按 SMOKE_BASE 的主机名第一段推）：
-#   _container() { # <插件 id> <服务名>：本实例里这个服务的容器
-#     local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$1" --filter "label=wonton.service=$2")
-#     if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
-#       inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
-#     fi
-#     [[ -z "$inst" ]] || args+=(--filter "label=wonton.instance=${inst//-/}")
-#     docker ps --format '{{.Names}}' "${args[@]}" | head -1
-#   }
-export DATA_NA=1
+_container() { # 本实例里 convertx 服务的容器
+  local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$SMOKE_PLUGIN_ID" --filter "label=wonton.service=convertx")
+  if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
+    inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
+  fi
+  [[ -z "$inst" ]] || args+=(--filter "label=wonton.instance=${inst//-/}")
+  docker ps --format '{{.Names}}' "${args[@]}" | head -1
+}
+
+_cx() { # <cookie jar> <curl 参数…>：容器里对 127.0.0.1:3000 发请求，输出状态码，错误进 stderr
+  local jar="$1"; shift
+  docker exec "$_cx_container" curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" "$@" http://127.0.0.1:3000
+}
+
+_cx_body() { # <cookie jar> <路径>：容器里取页面正文
+  docker exec "$_cx_container" curl -s --noproxy '*' -b "$1" -c "$1" "http://127.0.0.1:3000$2"
+}
+
+data_write() {
+  local container marker email pass code jar rand out job_id
+  [[ -n "${SMOKE_STATE:-}" ]] || { echo "SMOKE_STATE 没设"; return 1; }
+  container="$(_container)"
+  [[ -n "$container" ]] || { echo "找不到 convertx 容器（wonton.plugin 标签）"; return 1; }
+  _cx_container="$container"
+  jar="/tmp/.cx-smoke-cj"
+
+  rand="$(od -An -N6 -tx4 /dev/urandom | tr -d ' \n')"
+  marker="wonton-smoke-$rand"
+
+  # 已有凭据就登录（升级起点重跑、数据已在）；否则注册第一个账号（FIRST_RUN 时总是允许）。
+  if [[ -s "$(state_file)" ]]; then
+    email="$(jq -r '.email' "$(state_file)")"
+    pass="$(jq -r '.password' "$(state_file)")"
+    code="$(_cx "$jar" -d "email=$email&password=$pass" /login)"
+    [[ "$code" == 302 ]] || { echo "用已存凭据登录失败（HTTP $code）"; return 1; }
+  else
+    email="wonton-smoke-$rand@example.invalid"
+    pass="cx-$rand"
+    code="$(_cx "$jar" -d "email=$email&password=$pass" /register)"
+    if [[ "$code" != 302 ]]; then
+      echo "注册第一个账号失败（HTTP $code；数据已在且没有凭据存档时也会这样）"; return 1
+    fi
+    jq -n --arg e "$email" --arg p "$pass" '{email:$e,password:$p}' >"$(state_file)"
+  fi
+
+  # GET / 建一个 job，jobId 在 cookie jar 里；后面上传和转换都要带它。
+  code="$(_cx "$jar" /)"
+  [[ "$code" == 200 ]] || { echo "打开首页失败（HTTP $code）"; return 1; }
+  job_id="$(docker exec "$container" awk '$6=="jobId" {print $7}' "$jar" | tail -1)"
+  [[ -n "$job_id" ]] || { echo "cookie jar 里没有 jobId"; return 1; }
+
+  # 上传带标记的 txt，calibre 转成 PDF（txt→pdf 是上游 calibre 转换器的合法组合）。
+  docker exec "$container" sh -c "printf 'wonton smoke marker $marker\n' > '/tmp/$marker.txt'" || { echo "造上传文件失败"; return 1; }
+  code="$(docker exec "$container" curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -b "$jar" \
+    -F "file=@/tmp/$marker.txt" http://127.0.0.1:3000/upload)"
+  [[ "$code" == 200 ]] || { echo "上传失败（HTTP $code）"; return 1; }
+  code="$(_cx "$jar" -d "convert_to=pdf,calibre" --data-urlencode "file_names=[\"$marker.txt\"]" /convert)"
+  [[ "$code" == 302 ]] || { echo "发起转换失败（HTTP $code）"; return 1; }
+
+  # 转换是后台任务：等历史页出现这个文件且 job 是 completed（calibre 冷启动一次要几十秒）。
+  for _ in $(seq 1 60); do
+    out="$(_cx_body "$jar" /history)"
+    if grep -q "$marker" <<<"$out" && grep -q 'completed' <<<"$out"; then
+      docker exec "$container" rm -f "/tmp/$marker.txt" "$jar"
+      jq -n --arg email "$email" --arg pw "$pass" --arg marker "$marker" \
+        '{email:$email,password:$pw,marker:$marker}' >"$(state_file)"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "300 秒内历史页没出现 completed 的标记任务；页面开头：$(head -c 300 <<<"$out" | tr '\n' ' ')"
+  return 1
+}
+
+data_check() {
+  local container email pass marker out
+  container="$(_container)"
+  [[ -n "$container" ]] || { echo "找不到 convertx 容器（wonton.plugin 标签）"; return 1; }
+  _cx_container="$container"
+  [[ -s "$(state_file)" ]] || { echo "没有 data_write 留下的凭据存档"; return 1; }
+  email="$(jq -r '.email' "$(state_file)")"
+  pass="$(jq -r '.password' "$(state_file)")"
+  marker="$(jq -r '.marker' "$(state_file)")"
+  [[ -n "$email" && -n "$pass" && -n "$marker" ]] || { echo "凭据存档不完整：$(cat "$(state_file)")"; return 1; }
+
+  jar="/tmp/.cx-smoke-cj"
+  code="$(_cx "$jar" -d "email=$email&password=$pass" /login)"
+  [[ "$code" == 302 ]] || { echo "重装后用存档凭据登录失败（HTTP $code）——账号没保住？"; return 1; }
+  out="$(_cx_body "$jar" /history)"
+  if ! grep -q "$marker" <<<"$out"; then
+    echo "历史页里没有标记 $marker；页面开头：$(head -c 300 <<<"$out" | tr '\n' ' ')"
+    return 1
+  fi
+  docker exec "$container" rm -f "$jar"
+}

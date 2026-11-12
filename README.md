@@ -1,43 +1,31 @@
-# 云吞插件模板
+# 文件格式转换（ConvertX）
 
-开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
+把文件转成想要的格式：打开网页、拖进文件、选好目标格式，转完直接下载。图片、文档、电子书、音视频、表格的常用互转都有（Heic 转 JPG、Markdown 转 PDF、WAV 转 MP3……上千种格式），转换在自家服务器上完成，不经过任何外部网站。
 
-这是一个能安装的示例插件 `app.example.hello`：使用 nginx 官方镜像显示问候页，经网关的 `sso: proxy` 注入用户名，页面显示“你好，<用户名>”。示例没有应用账号、持久化数据或 MCP 工具。
+上游是 [C4illin/ConvertX](https://github.com/C4illin/ConvertX)（AGPL-3.0），本插件用它的官方镜像 `ghcr.io/c4illin/convertx`，按摘要固定，不改上游。
 
-## 示例文件
+## 怎么用
 
-| 路径 | 内容 |
-| --- | --- |
-| `docker-compose.yml` | 示例清单、nginx 服务和三个 `configs` |
-| `web/default.conf.template` | nginx 配置，启用 SSI 回显用户名并提供健康检查入口；只放行来自核心地址（`${WONTON_CORE_ADDRESS}`）的请求，其余来源 403 |
-| `web/index.html` | 问候页 |
-| `web/tokens.css` | 页面主题变量的后备值 |
-| `tabs/` | 示例主页的应用页面图标 |
-| `screenshots/home.png` | 商店详情页的示例截图 |
-| `scripts/smoke-probes.sh` | 检查真实页面和网关注入身份的插件探针 |
+装好插件后打开它的网页，注册第一个账号——它就是管理员账号，之后注册自动关闭，家里人共用这个账号（`ACCOUNT_REGISTRATION=false`，只有第一个账号能注册）。上传文件、选目标格式、下载结果；转换记录在 History 页，转出的文件默认保留 24 小时（可在插件设置里改）。
 
-从模板创建自己的插件后，替换示例清单、网页和素材；具体步骤见[写插件](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件)。
+插件设置里还可以调同时转换的任务数（默认 2，LibreOffice、ffmpeg 并发多了内存吃紧，0 为不限）和历史页日期的语言格式。当前核心还没接设置注入（wonton#242 未合），这些值先用 compose 里的兜底默认值，设置页可用后自动生效。
 
-## 对着别的栈跑探针
+## 网页入口和连接
 
-`probes`、`api`、`session` 按 `.wonton/.env` 的 `WONTON_BASE_DOMAIN` 拼核心地址，`up` 起的栈自己写这个键。插件装进别人的栈、或者对着已有环境排查时，把那套栈的基础域名写进 `.wonton/.env`，不要只按实例名猜地址：实例名只是资源名前缀，网关按 Host 认域名，拼错了会回“没有安装”。
+网页经云吞核心网关访问（手机 App 和浏览器里直接打开插件即可），插件不开局域网端口，也没有可直连的地址——所有访问都走网关登录，`sso: none`（应用自己的账号体系）。
 
-```bash
-WONTON_BASE_DOMAIN=wonton.localhost
-```
+## 数据在哪
 
-## 核心镜像
+账号（SQLite）和上传、转出的文件都在插件数据目录（容器里 `/app/data`）：`data/uploads`、`data/output`。卸载选保留数据时，重装后账号和转换记录都还在；选删除才清掉。JWT 签名密钥由核心生成并保管（`secrets.jwt_secret`），不设的话上游每次重启用随机值，所有人被登出。
 
-检查和冒烟默认用套件里的核心镜像（`ghcr.io/wontonapp/wonton-core:main`）；要固定别的核心镜像，在仓库 Settings → Variables 设 `WONTON_CORE_IMAGE`，手动触发“检查”时填的 `core-image` 输入优先。
+## 已知限制
 
-## 更新开发套件
-
-```bash
-scripts/dev.sh kit-update
-```
-
-在从模板新建的插件仓库中更新套件；本仓库是套件源头，执行时只提示并退出。版本、可选引用和自定义脚本约定见[开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#更新开发套件)。
+- 转换格式以上游镜像内置的转换器为准（ffmpeg、ImageMagick、LibreOffice、calibre、pandoc 等），运行时不出网，不能在线取新转换器。
+- 上游界面只有英文；历史页日期的语言可在插件设置里改（当前核心接上前按默认的 en 显示）。
+- 上游会定期删除超过期限的转出文件（默认 24 小时），需要长期保存的结果请及时下载。
+- 经网关进容器是 HTTP，按上游说明设了 `HTTP_ALLOWED=true`（否则 Secure Cookie 被浏览器丢弃、登录不上）；网关挡在前面，不降低安全性。
+- 转换吃内存（LibreOffice、单个文档几百 MB），清单要求 1G 内存。
 
 ## 图标
 
-`icon.svg` 是本仓库原创线条图标，按本仓库 MIT 许可证分发，见 [NOTICE](NOTICE)。
+图标来自上游 `public/favicon.svg`（v0.20.0），等比缩放居中补白色方形底板；来源、处理方式、上游许可证全文和商标说明见 [NOTICE](NOTICE)。
