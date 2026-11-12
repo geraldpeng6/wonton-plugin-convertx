@@ -24,9 +24,9 @@ _container() { # 本实例里 convertx 服务的容器；e2e 的 data_write 跑�
   docker ps --format '{{.Names}}' "${args[@]}" | head -1
 }
 
-_cx() { # <cookie jar> <curl 参数…>：容器里对 127.0.0.1:3000 发请求，输出状态码，错误进 stderr
-  local jar="$1"; shift
-  docker exec "$_cx_container" curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" "$@" http://127.0.0.1:3000
+_cx() { # <cookie jar> <路径> [curl 参数…]：容器里对 127.0.0.1:3000 发请求，输出状态码
+  local jar="$1" path="$2"; shift 2
+  docker exec "$_cx_container" curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" "$@" "http://127.0.0.1:3000$path"
 }
 
 _cx_body() { # <cookie jar> <路径>：容器里取页面正文
@@ -48,13 +48,14 @@ data_write() {
   if [[ -s "$(state_file)" ]]; then
     email="$(jq -r '.email' "$(state_file)")"
     pass="$(jq -r '.password' "$(state_file)")"
-    code="$(_cx "$jar" -d "email=$email&password=$pass" /login)"
+    code="$(_cx "$jar" /login -d "email=$email&password=$pass")"
     [[ "$code" == 302 ]] || { echo "用已存凭据登录失败（HTTP $code）"; return 1; }
   else
     email="wonton-smoke-$rand@example.invalid"
     pass="cx-$rand"
-    code="$(_cx "$jar" -d "email=$email&password=$pass" /register)"
-    if [[ "$code" != 302 ]]; then
+    code="$(_cx "$jar" /register -d "email=$email&password=$pass")"
+    # 成功和“注册已关”都回 302：成功会写 auth Cookie，被拒不会，拿 Cookie 判定。
+    if [[ "$code" != 302 ]] || ! docker exec "$container" grep -q $'\tauth\t' "$jar" 2>/dev/null; then
       echo "注册第一个账号失败（HTTP $code；数据已在且没有凭据存档时也会这样）"; return 1
     fi
     jq -n --arg e "$email" --arg p "$pass" '{email:$e,password:$p}' >"$(state_file)"
@@ -71,7 +72,7 @@ data_write() {
   code="$(docker exec "$container" curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -b "$jar" \
     -F "file=@/tmp/$marker.txt" http://127.0.0.1:3000/upload)"
   [[ "$code" == 200 ]] || { echo "上传失败（HTTP $code）"; return 1; }
-  code="$(_cx "$jar" -d "convert_to=pdf,calibre" --data-urlencode "file_names=[\"$marker.txt\"]" /convert)"
+  code="$(_cx "$jar" /convert -d "convert_to=pdf,calibre" --data-urlencode "file_names=[\"$marker.txt\"]")"
   [[ "$code" == 302 ]] || { echo "发起转换失败（HTTP $code）"; return 1; }
 
   # 转换是后台任务：等历史页出现这个文件且 job 是 completed（calibre 冷启动一次要几十秒）。
@@ -101,7 +102,7 @@ data_check() {
   [[ -n "$email" && -n "$pass" && -n "$marker" ]] || { echo "凭据存档不完整：$(cat "$(state_file)")"; return 1; }
 
   jar="/tmp/.cx-smoke-cj"
-  code="$(_cx "$jar" -d "email=$email&password=$pass" /login)"
+  code="$(_cx "$jar" /login -d "email=$email&password=$pass")"
   [[ "$code" == 302 ]] || { echo "重装后用存档凭据登录失败（HTTP $code）——账号没保住？"; return 1; }
   out="$(_cx_body "$jar" /history)"
   if ! grep -q "$marker" <<<"$out"; then
